@@ -23,11 +23,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        working-directory: arxiv-daily
         run: pip install -r requirements.txt
 
       - name: Run daily arXiv screening
-        working-directory: arxiv-daily
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
@@ -37,4 +35,4 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update daily arXiv report"
-          file_pattern: "arxiv-daily/reports/*.md"
+          file_pattern: "reports/*.md"
