@@ -1,0 +1,40 @@
+name: Daily arXiv Screening
+
+on:
+  schedule:
+    # 09:00 Asia/Seoul is 00:00 UTC.
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-daily-arxiv:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: arxiv-daily
+        run: pip install -r requirements.txt
+
+      - name: Run daily arXiv screening
+        working-directory: arxiv-daily
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
+        run: python arxiv_daily.py
+
+      - name: Commit reports
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update daily arXiv report"
+          file_pattern: "arxiv-daily/reports/*.md"
