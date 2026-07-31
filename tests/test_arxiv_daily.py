@@ -5,6 +5,7 @@ from arxiv_daily import (
     deduplicate_papers,
     generate_markdown_report,
     score_paper,
+    score_scoop_risk,
     with_summaries,
 )
 
@@ -138,3 +139,33 @@ def test_report_separates_hep_ph_and_hep_th() -> None:
     assert "hep-ph candidate" in markdown
     assert "### hep-th" in markdown
     assert "hep-th candidate" in markdown
+
+
+def test_direct_photon_pair_overlap_is_critical() -> None:
+    paper = make_paper(
+        arxiv_id="2606.30759",
+        title="Quantum Information of Photon Pairs at Lepton Colliders",
+        abstract=(
+            "We formulate a factorization framework and an effective two-qubit description "
+            "to study entanglement and Bell inequality violation in photon pairs."
+        ),
+    )
+
+    score, level, reasons = score_scoop_risk(paper)
+
+    assert score >= 75
+    assert level == "critical"
+    assert any(reason.startswith("same_system:") for reason in reasons)
+
+
+def test_generic_entanglement_paper_does_not_trigger_scoop_alarm() -> None:
+    paper = make_paper(
+        title="Entanglement entropy in curved spacetime",
+        abstract="We study holographic entropy in a black-hole background.",
+    )
+
+    score, level, _ = score_scoop_risk(paper)
+
+    assert score < 35
+    assert level == "normal"
+
