@@ -20,6 +20,9 @@ DEFAULT_MAX_RESULTS = 80
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_HIGH_SUMMARY_LIMIT = 3
 DEFAULT_MEDIUM_SUMMARY_LIMIT = 0
+DEFAULT_NOTION_PARENT_PAGE_ID = "39751c6c82cb817bb84ce5cd2b9fdef7"
+DEFAULT_NOTION_DATABASE_ID = "b8a5a2eb179a49e3800ba185263d57e4"
+NOTION_VERSION = "2022-06-28"
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 KST = timezone(timedelta(hours=9), "KST")
 SUMMARY_LIMIT_MESSAGE = "요약 없음: MVP 요약 한도 초과로 이번 실행에서는 LLM 요약을 생성하지 않았습니다."
@@ -127,6 +130,33 @@ class ScoredPaper:
     relevance: str
     matched_keywords: dict[str, list[str]]
     summary: str | None = None
+    scoop_score: int = 0
+    scoop_level: str = "normal"
+    scoop_reasons: tuple[str, ...] = ()
+
+
+SCOOP_DIMENSIONS = {
+    "same_system": (28, ("photon pair", "photon pairs", "two-photon", "gamma gamma", "annihilation photon")),
+    "same_environment": (18, ("lepton collider", "lepton colliders", "e+e-", "e+ e-", "electron-positron")),
+    "same_state": (22, ("density matrix", "two-qubit", "spin density matrix", "quantum state tomography")),
+    "same_question": (20, ("entanglement", "bell inequality", "bell non-locality", "quantum information")),
+    "same_method": (12, ("helicity amplitude", "helicity amplitudes", "model-independent", "general framework", "factorization framework", "stokes-mueller")),
+}
+
+
+def score_scoop_risk(paper: Paper) -> tuple[int, str, tuple[str, ...]]:
+    """Estimate direct-overlap risk; this is not an allegation of idea theft."""
+    text = f"{paper.title} {paper.abstract}".lower()
+    score = 0
+    reasons: list[str] = []
+    for dimension, (weight, phrases) in SCOOP_DIMENSIONS.items():
+        matches = sorted({phrase for phrase in phrases if keyword_matches(text, phrase)})
+        if matches:
+            score += weight
+            reasons.append(f"{dimension}: {', '.join(matches[:3])}")
+    score = min(score, 100)
+    level = "critical" if score >= 75 else "high" if score >= 55 else "watch" if score >= 35 else "normal"
+    return score, level, tuple(reasons)
 
 
 def normalize_whitespace(text: str) -> str:
@@ -252,6 +282,7 @@ def score_paper(paper: Paper) -> ScoredPaper:
     else:
         relevance = "low"
 
+    scoop_score, scoop_level, scoop_reasons = score_scoop_risk(paper)
     return ScoredPaper(
         paper=paper,
         score=score,
@@ -261,6 +292,9 @@ def score_paper(paper: Paper) -> ScoredPaper:
             for location, keywords in matched_keywords.items()
             if keywords
         },
+        scoop_score=scoop_score,
+        scoop_level=scoop_level,
+        scoop_reasons=scoop_reasons,
     )
 
 
@@ -324,7 +358,13 @@ def format_paper_block(scored: ScoredPaper, include_summary: bool) -> str:
     paper = scored.paper
     authors = ", ".join(paper.authors) if paper.authors else "Unknown authors"
     categories = ", ".join(paper.categories) if paper.categories else "unknown"
+    alert = {
+        "critical": "🚨 **SCOOP RISK — 즉시 원문 비교 필요**",
+        "high": "⚠️ **높은 직접 중복 가능성**",
+        "watch": "🟡 **연구 중복 관찰 대상**",
+    }.get(scored.scoop_level)
     lines = [
+        alert,
         f"### {paper.title}",
         "",
         f"- arXiv: [{paper.arxiv_id}]({paper.abs_url}) | [PDF]({paper.pdf_url})",
@@ -333,6 +373,8 @@ def format_paper_block(scored: ScoredPaper, include_summary: bool) -> str:
         f"- Published: {paper.published or 'unknown'}",
         f"- Updated: {paper.updated or 'unknown'}",
         f"- Relevance score: {scored.score} ({scored.relevance})",
+        f"- Scoop-risk score: {scored.scoop_score}/100 ({scored.scoop_level})",
+        f"- Scoop-risk reasons: {'; '.join(scored.scoop_reasons) or 'none'}",
         f"- Matched keywords: {format_keywords(scored.matched_keywords)}",
         "",
         "**Abstract**",
@@ -341,7 +383,7 @@ def format_paper_block(scored: ScoredPaper, include_summary: bool) -> str:
     ]
     if include_summary:
         lines.extend(["", scored.summary or "요약 실패: LLM 요약 결과가 없습니다."])
-    return "\n".join(lines)
+    return "\n".join(line for line in lines if line is not None)
 
 
 def primary_category(paper: Paper) -> str:
@@ -443,6 +485,111 @@ def save_report(markdown: str, date: str) -> Path:
     return dated_report
 
 
+def notion_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {os.environ['NOTION_TOKEN']}",
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
+
+
+def get_or_create_notion_database() -> str | None:
+    if not os.getenv("NOTION_TOKEN"):
+        return None
+    configured = os.getenv("NOTION_DATABASE_ID", DEFAULT_NOTION_DATABASE_ID)
+    if configured:
+        return configured.replace("-", "")
+
+    headers = notion_headers()
+    search = requests.post(
+        "https://api.notion.com/v1/search",
+        headers=headers,
+        json={"query": "논문 레이더", "filter": {"property": "object", "value": "database"}},
+        timeout=30,
+    )
+    search.raise_for_status()
+    for item in search.json().get("results", []):
+        title = "".join(part.get("plain_text", "") for part in item.get("title", []))
+        if title == "논문 레이더":
+            return item["id"].replace("-", "")
+
+    parent_id = os.getenv("NOTION_PARENT_PAGE_ID", DEFAULT_NOTION_PARENT_PAGE_ID)
+    payload = {
+        "parent": {"type": "page_id", "page_id": parent_id},
+        "title": [{"type": "text", "text": {"content": "논문 레이더"}}],
+        "properties": {
+            "논문명": {"title": {}},
+            "arXiv ID": {"rich_text": {}},
+            "발표일": {"date": {}},
+            "관련도": {"number": {}},
+            "SCOOP 위험": {"select": {"options": [
+                {"name": "🚨 Critical", "color": "red"},
+                {"name": "⚠️ High", "color": "orange"},
+                {"name": "🟡 Watch", "color": "yellow"},
+                {"name": "Normal", "color": "gray"},
+            ]}},
+            "위험점수": {"number": {}},
+            "원문": {"url": {}},
+            "검토상태": {"select": {"options": [
+                {"name": "즉시 비교", "color": "red"},
+                {"name": "읽기 대기", "color": "yellow"},
+                {"name": "보관", "color": "gray"},
+            ]}},
+        },
+    }
+    response = requests.post("https://api.notion.com/v1/databases", headers=headers, json=payload, timeout=30)
+    response.raise_for_status()
+    return response.json()["id"].replace("-", "")
+
+
+def upload_to_notion(scored_papers: list[ScoredPaper]) -> None:
+    database_id = get_or_create_notion_database()
+    if not database_id:
+        print("[info] NOTION_TOKEN not set; skipping Notion upload")
+        return
+    headers = notion_headers()
+    for scored in scored_papers:
+        if scored.relevance == "low" and scored.scoop_level == "normal":
+            continue
+        paper = scored.paper
+        query = requests.post(
+            f"https://api.notion.com/v1/databases/{database_id}/query",
+            headers=headers,
+            json={"filter": {"property": "arXiv ID", "rich_text": {"equals": paper.arxiv_id}}},
+            timeout=30,
+        )
+        query.raise_for_status()
+        if query.json().get("results"):
+            continue
+        risk_label = {"critical": "🚨 Critical", "high": "⚠️ High", "watch": "🟡 Watch"}.get(scored.scoop_level, "Normal")
+        review = "즉시 비교" if scored.scoop_level in {"critical", "high"} else "읽기 대기" if scored.relevance != "low" else "보관"
+        published_date = paper.published[:10] if paper.published else None
+        body = (
+            f"## 자동 판정\n\n- 직접 중복 위험: **{scored.scoop_score}/100 ({scored.scoop_level})**\n"
+            f"- 판정 근거: {'; '.join(scored.scoop_reasons) or '직접 중복 신호 없음'}\n"
+            f"- 일반 관련도: {scored.score} ({scored.relevance})\n\n"
+            f"> 이 표시는 제목·초록 기반의 경쟁 가능성 경보다. 실제 스쿱 여부는 원문과 현재 원고의 claim-by-claim 비교로 확정한다.\n\n"
+            f"## Abstract\n\n{paper.abstract[:1800]}\n\n[arXiv 원문]({paper.abs_url}) · [PDF]({paper.pdf_url})"
+        )
+        payload = {
+            "parent": {"database_id": database_id},
+            "properties": {
+                "논문명": {"title": [{"text": {"content": paper.title[:2000]}}]},
+                "arXiv ID": {"rich_text": [{"text": {"content": paper.arxiv_id}}]},
+                "발표일": {"date": {"start": published_date}} if published_date else {"date": None},
+                "관련도": {"number": scored.score},
+                "SCOOP 위험": {"select": {"name": risk_label}},
+                "위험점수": {"number": scored.scoop_score},
+                "원문": {"url": paper.abs_url},
+                "검토상태": {"select": {"name": review}},
+            },
+            "children": [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": body[:2000]}}]}}],
+        }
+        response = requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        print(f"[info] uploaded {paper.arxiv_id} to Notion")
+
+
 def with_summaries(scored_papers: list[ScoredPaper]) -> list[ScoredPaper]:
     if not get_bool_env("ENABLE_LLM_SUMMARIES", False):
         return [
@@ -452,6 +599,9 @@ def with_summaries(scored_papers: list[ScoredPaper]) -> list[ScoredPaper]:
                 relevance=scored.relevance,
                 matched_keywords=scored.matched_keywords,
                 summary=None,
+                scoop_score=scored.scoop_score,
+                scoop_level=scored.scoop_level,
+                scoop_reasons=scored.scoop_reasons,
             )
             for scored in scored_papers
         ]
@@ -480,6 +630,9 @@ def with_summaries(scored_papers: list[ScoredPaper]) -> list[ScoredPaper]:
                     relevance=scored.relevance,
                     matched_keywords=scored.matched_keywords,
                     summary=summary,
+                    scoop_score=scored.scoop_score,
+                    scoop_level=scored.scoop_level,
+                    scoop_reasons=scored.scoop_reasons,
                 )
             )
         elif scored.relevance in {"high", "medium"}:
@@ -490,6 +643,9 @@ def with_summaries(scored_papers: list[ScoredPaper]) -> list[ScoredPaper]:
                     relevance=scored.relevance,
                     matched_keywords=scored.matched_keywords,
                     summary=SUMMARY_LIMIT_MESSAGE,
+                    scoop_score=scored.scoop_score,
+                    scoop_level=scored.scoop_level,
+                    scoop_reasons=scored.scoop_reasons,
                 )
             )
         else:
@@ -512,8 +668,10 @@ def main() -> None:
     report_date = datetime.now(KST).strftime("%Y-%m-%d")
     markdown = generate_markdown_report(summarized, report_date=report_date)
     report_path = save_report(markdown, report_date)
+    upload_to_notion(summarized)
     print(f"[info] wrote report to {report_path}")
 
 
 if __name__ == "__main__":
     main()
+
