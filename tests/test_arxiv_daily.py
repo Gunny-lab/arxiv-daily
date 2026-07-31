@@ -1,9 +1,14 @@
+Exit code: 0
+Wall time: 1.1 seconds
+Output:
 from arxiv_daily import (
     Paper,
     ScoredPaper,
     SUMMARY_LIMIT_MESSAGE,
     deduplicate_papers,
     generate_markdown_report,
+    normalize_doi_url,
+    notion_link_properties,
     score_paper,
     score_scoop_risk,
     with_summaries,
@@ -168,4 +173,19 @@ def test_generic_entanglement_paper_does_not_trigger_scoop_alarm() -> None:
 
     assert score < 35
     assert level == "normal"
+
+
+def test_normalize_doi_url() -> None:
+    assert normalize_doi_url("10.1234/example") == "https://doi.org/10.1234/example"
+    assert normalize_doi_url("https://doi.org/10.1234/example") == "https://doi.org/10.1234/example"
+    assert normalize_doi_url(None) is None
+
+
+def test_notion_links_are_only_exposed_for_high_or_critical_risk() -> None:
+    paper = make_paper()
+    high = ScoredPaper(paper=paper, score=30, relevance="high", matched_keywords={}, scoop_level="high")
+    watch = ScoredPaper(paper=paper, score=20, relevance="medium", matched_keywords={}, scoop_level="watch")
+
+    assert notion_link_properties(high)["PDF"]["url"] == paper.pdf_url
+    assert notion_link_properties(watch) == {"PDF": {"url": None}, "DOI": {"url": None}}
 
