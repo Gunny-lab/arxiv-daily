@@ -576,6 +576,36 @@ def notion_link_properties(scored: ScoredPaper) -> dict[str, dict]:
     }
 
 
+def backfill_notion_high_risk_pdf_links(database_id: str, headers: dict[str, str]) -> None:
+    query = requests.post(
+        f"https://api.notion.com/v1/databases/{database_id}/query",
+        headers=headers,
+        json={
+            "filter": {
+                "or": [
+                    {"property": "SCOOP 위험", "select": {"equals": "🚨 Critical"}},
+                    {"property": "SCOOP 위험", "select": {"equals": "⚠️ High"}},
+                ]
+            }
+        },
+        timeout=30,
+    )
+    query.raise_for_status()
+    for page in query.json().get("results", []):
+        properties = page.get("properties", {})
+        arxiv_parts = properties.get("arXiv ID", {}).get("rich_text", [])
+        arxiv_id = "".join(part.get("plain_text", "") for part in arxiv_parts).strip()
+        if not arxiv_id:
+            continue
+        response = requests.patch(
+            f"https://api.notion.com/v1/pages/{page['id']}",
+            headers=headers,
+            json={"properties": {"PDF": {"url": f"https://arxiv.org/pdf/{arxiv_id}"}}},
+            timeout=30,
+        )
+        response.raise_for_status()
+
+
 def upload_to_notion(scored_papers: list[ScoredPaper]) -> None:
     database_id = get_or_create_notion_database()
     if not database_id:
@@ -583,6 +613,7 @@ def upload_to_notion(scored_papers: list[ScoredPaper]) -> None:
         return
     headers = notion_headers()
     ensure_notion_link_properties(database_id, headers)
+    backfill_notion_high_risk_pdf_links(database_id, headers)
     for scored in scored_papers:
         if scored.relevance == "low" and scored.scoop_level == "normal":
             continue
