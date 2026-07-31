@@ -29,6 +29,9 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_PARENT_PAGE_ID: ${{ vars.NOTION_PARENT_PAGE_ID || '39751c6c82cb817bb84ce5cd2b9fdef7' }}
+          NOTION_DATABASE_ID: ${{ vars.NOTION_DATABASE_ID || 'b8a5a2eb179a49e3800ba185263d57e4' }}
         run: python arxiv_daily.py
 
       - name: Commit reports
@@ -36,3 +39,4 @@ jobs:
         with:
           commit_message: "Update daily arXiv report"
           file_pattern: "reports/*.md"
+
