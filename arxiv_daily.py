@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 1.1 seconds
+Output:
 from __future__ import annotations
 
 import html
@@ -121,6 +124,7 @@ class Paper:
     updated: str
     abs_url: str
     pdf_url: str
+    doi_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +169,17 @@ def normalize_whitespace(text: str) -> str:
 
 def extract_arxiv_id(entry_id: str) -> str:
     return entry_id.rstrip("/").split("/")[-1]
+
+
+def normalize_doi_url(doi: str | None) -> str | None:
+    if not doi:
+        return None
+    normalized = doi.strip()
+    if not normalized:
+        return None
+    if normalized.startswith(("https://doi.org/", "http://doi.org/")):
+        return normalized.replace("http://", "https://", 1)
+    return f"https://doi.org/{normalized}"
 
 
 def get_bool_env(name: str, default: bool = False) -> bool:
@@ -230,6 +245,7 @@ def fetch_arxiv_papers(category: str, max_results: int = DEFAULT_MAX_RESULTS) ->
                 updated=entry.get("updated", ""),
                 abs_url=abs_url,
                 pdf_url=pdf_url,
+                doi_url=normalize_doi_url(entry.get("arxiv_doi") or entry.get("doi")),
             )
         )
 
@@ -530,6 +546,8 @@ def get_or_create_notion_database() -> str | None:
             ]}},
             "위험점수": {"number": {}},
             "원문": {"url": {}},
+            "PDF": {"url": {}},
+            "DOI": {"url": {}},
             "검토상태": {"select": {"options": [
                 {"name": "즉시 비교", "color": "red"},
                 {"name": "읽기 대기", "color": "yellow"},
@@ -542,12 +560,32 @@ def get_or_create_notion_database() -> str | None:
     return response.json()["id"].replace("-", "")
 
 
+def ensure_notion_link_properties(database_id: str, headers: dict[str, str]) -> None:
+    response = requests.patch(
+        f"https://api.notion.com/v1/databases/{database_id}",
+        headers=headers,
+        json={"properties": {"PDF": {"url": {}}, "DOI": {"url": {}}}},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+
+def notion_link_properties(scored: ScoredPaper) -> dict[str, dict]:
+    if scored.scoop_level not in {"critical", "high"}:
+        return {"PDF": {"url": None}, "DOI": {"url": None}}
+    return {
+        "PDF": {"url": scored.paper.pdf_url or None},
+        "DOI": {"url": scored.paper.doi_url},
+    }
+
+
 def upload_to_notion(scored_papers: list[ScoredPaper]) -> None:
     database_id = get_or_create_notion_database()
     if not database_id:
         print("[info] NOTION_TOKEN not set; skipping Notion upload")
         return
     headers = notion_headers()
+    ensure_notion_link_properties(database_id, headers)
     for scored in scored_papers:
         if scored.relevance == "low" and scored.scoop_level == "normal":
             continue
@@ -559,17 +597,31 @@ def upload_to_notion(scored_papers: list[ScoredPaper]) -> None:
             timeout=30,
         )
         query.raise_for_status()
-        if query.json().get("results"):
+        existing = query.json().get("results", [])
+        link_properties = notion_link_properties(scored)
+        if existing:
+            response = requests.patch(
+                f"https://api.notion.com/v1/pages/{existing[0]['id']}",
+                headers=headers,
+                json={"properties": link_properties},
+                timeout=30,
+            )
+            response.raise_for_status()
             continue
         risk_label = {"critical": "🚨 Critical", "high": "⚠️ High", "watch": "🟡 Watch"}.get(scored.scoop_level, "Normal")
         review = "즉시 비교" if scored.scoop_level in {"critical", "high"} else "읽기 대기" if scored.relevance != "low" else "보관"
         published_date = paper.published[:10] if paper.published else None
+        direct_links = ""
+        if scored.scoop_level in {"critical", "high"}:
+            direct_links = f"\n\n[arXiv 원문]({paper.abs_url}) · [PDF 바로 열기]({paper.pdf_url})"
+            if paper.doi_url:
+                direct_links += f" · [DOI]({paper.doi_url})"
         body = (
             f"## 자동 판정\n\n- 직접 중복 위험: **{scored.scoop_score}/100 ({scored.scoop_level})**\n"
             f"- 판정 근거: {'; '.join(scored.scoop_reasons) or '직접 중복 신호 없음'}\n"
             f"- 일반 관련도: {scored.score} ({scored.relevance})\n\n"
             f"> 이 표시는 제목·초록 기반의 경쟁 가능성 경보다. 실제 스쿱 여부는 원문과 현재 원고의 claim-by-claim 비교로 확정한다.\n\n"
-            f"## Abstract\n\n{paper.abstract[:1800]}\n\n[arXiv 원문]({paper.abs_url}) · [PDF]({paper.pdf_url})"
+            f"## Abstract\n\n{paper.abstract[:1800]}{direct_links}"
         )
         payload = {
             "parent": {"database_id": database_id},
@@ -582,6 +634,7 @@ def upload_to_notion(scored_papers: list[ScoredPaper]) -> None:
                 "위험점수": {"number": scored.scoop_score},
                 "원문": {"url": paper.abs_url},
                 "검토상태": {"select": {"name": review}},
+                **link_properties,
             },
             "children": [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": body[:2000]}}]}}],
         }
