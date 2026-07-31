@@ -126,6 +126,8 @@ pytest
 - Embedding-based recommendation
 - PDF full-text parsing
 - Email sending
-- Notion integration
+- Notion `논문 레이더` 자동 기록 (`NOTION_TOKEN` 필요)
+- 직접 연구 중복 가능성을 별도로 판정하는 `SCOOP 위험` 점수
 - Slack/Discord integration
 - Web dashboard
+
