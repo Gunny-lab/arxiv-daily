@@ -1,4 +1,4 @@
-# Daily arXiv Candidate Screening - 2026-11-15
+# Daily arXiv Candidate Screening - 2026-11-16
 
 Categories: hep-ph, hep-th
 
